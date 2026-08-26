@@ -10,6 +10,9 @@
 #      그리고 각 세그먼트 1위 업종이 탄력성 기준으로도 성립하려면 필요한 최소 탄력성은
 #      얼마인지 역산 (H9) — H7의 "486개 중 6개만 성립"이 가정치의 과보수성 때문인지
 #      확인하기 위함.
+#   5. 실제 판매 중인 카드 상품(대형마트 10% 할인, 월 한도 1.5만원, 웹 검색으로 확인)의
+#      명목 혜택률을 본 모델에 넣어 검증 (H10) — 실제 시장에 혜택 상품이 존재한다는
+#      사실 자체로 이 프로젝트의 비관적 결론이 흔들리는지 확인.
 #   결론이 무너지는 조건은 숨기지 않고 그대로 기록한다.
 
 from pathlib import Path
@@ -30,6 +33,15 @@ FEE_TIERS = [0.0040, 0.0100, 0.0115, 0.0145, 0.0208]  # config/assumptions.yaml 
 EXCLUDED_AGES = {1, 11}
 REF_R = 0.003  # 최소 유의미 혜택률(0.3%) 기준으로 성립 여부 판정
 ELASTICITY_MULTIPLIERS = [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0]  # 현재 가정치 대비 배수
+
+# H10: 실제 시장 카드 상품 대비 검증. 웹 검색(2026-08-27)으로 확인한 실제 판매 상품 —
+# 롯데카드 LOCA CLASSIC: 전월실적 150만원 이상 시 대형마트 10% 할인, 월 한도 15,000원.
+# 출처: https://namu.wiki/w/롯데카드/카드%20상품
+# 명목 혜택률(10%)은 본 프로젝트의 소매/유통 가정 수수료율(1.15%)보다 훨씬 커서 그대로는
+# 모델에 넣을 수 없다 — 월 한도가 "실효 혜택률"을 낮추는 역할을 한다는 가설(H10)을 검증.
+REAL_PRODUCT_NOMINAL_R = 0.10
+REAL_PRODUCT_MONTHLY_CAP = 15_000
+REAL_PRODUCT_SPEND_LEVELS = [300_000, 500_000, 1_000_000, 1_500_000]  # 월 대형마트 지출 가정(예시)
 
 
 def g_star(f: float, r: float) -> float:
@@ -186,6 +198,49 @@ def elasticity_sensitivity(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     return sweep_df, required_df
 
 
+def real_product_check(cfg: dict) -> pd.DataFrame:
+    """H10: 실제 판매 중인 카드 상품(대형마트 10% 할인, 월 한도 15,000원)의 명목
+    혜택률을 그대로 넣으면 모델과 안 맞는다(r=10% >> f=1.15%) — 월 한도가 지출액에
+    따라 '실효 혜택률'을 얼마나 낮추는지, 그 실효 혜택률이 본 모델의 f보다 낮아지는
+    지점(=g*가 유한해지는 지점)이 실제로 있는지를 확인한다."""
+    f = cfg["merchant_fee_rate"]["소매/유통"]
+    threshold = cfg["g_star_threshold"]
+
+    rows = []
+    for spend in REAL_PRODUCT_SPEND_LEVELS:
+        capped = spend * REAL_PRODUCT_NOMINAL_R > REAL_PRODUCT_MONTHLY_CAP
+        effective_r = REAL_PRODUCT_MONTHLY_CAP / spend if capped else REAL_PRODUCT_NOMINAL_R
+        g = g_star(f, effective_r)
+        rows.append(
+            {
+                "월_대형마트_지출_가정": spend,
+                "명목혜택률": REAL_PRODUCT_NOMINAL_R,
+                "한도_적용됨": capped,
+                "실효혜택률": effective_r,
+                "f(소매유통_가정)": f,
+                "g*(실효혜택률_기준)": g,
+                "threshold이하": bool(np.isfinite(g) and g <= threshold),
+            }
+        )
+    result = pd.DataFrame(rows)
+
+    spend_for_r_eq_f = REAL_PRODUCT_MONTHLY_CAP / f  # 실효r == f가 되는 지출액(g* 발산 경계)
+
+    print("=== 5. 실제 카드 상품(대형마트 10% 할인, 월 한도 1.5만원) 대비 검증 (H10) ===")
+    print(result.to_string(index=False))
+    print(
+        f"\n실효 혜택률이 f({f:.2%})와 같아지는(=g* 발산 경계) 월 대형마트 지출액: "
+        f"약 {spend_for_r_eq_f:,.0f}원. 이보다 적게 쓰면 실효 혜택률이 f를 넘어 g*=inf(성립 "
+        f"불가), 이보다 많이 써야 g*가 유한해진다 — 그런데 유한해져도(예: 150만원 지출 시 "
+        f"g*={g_star(f, REAL_PRODUCT_MONTHLY_CAP/1_500_000):.1%}) threshold({threshold:.0%})는 "
+        f"훨씬 못 미친다. 즉 월 한도가 '실효 혜택률을 낮춰 성립시키는' 장치라기보다, 모델이 "
+        f"가정하지 않은 다른 방식(전월실적 조건으로 다른 업종 소비까지 끌어들이는 락인, 절대"
+        f"손실액 자체를 한도로 캡핑해 세그먼트 단위 감당 가능한 수준으로 묶는 것)으로 "
+        f"손익을 맞추고 있을 가능성을 시사한다."
+    )
+    return result
+
+
 def main() -> None:
     if not CLEANED_PATH.exists():
         raise SystemExit(f"[중단] {CLEANED_PATH} 없음. 먼저 02_clean.py 실행할 것.")
@@ -195,6 +250,7 @@ def main() -> None:
     inflow_df = inflow_sensitivity()
     k_df = k_sensitivity(cfg)
     elasticity_sweep_df, elasticity_required_df = elasticity_sensitivity(cfg)
+    real_product_df = real_product_check(cfg)
 
     OUT_SENSITIVITY.parent.mkdir(parents=True, exist_ok=True)
     with open(OUT_SENSITIVITY, "w", encoding="utf-8-sig") as f:
@@ -208,6 +264,8 @@ def main() -> None:
         elasticity_sweep_df.to_csv(f, index=False)
         f.write("\n## 4b. 세그먼트 1위 업종 성립에 필요한 탄력성 배수\n")
         elasticity_required_df.to_csv(f, index=False)
+        f.write("\n## 5. 실제 카드 상품(대형마트 10% 할인) 대비 검증\n")
+        real_product_df.to_csv(f, index=False)
     print(f"\n[완료] {OUT_SENSITIVITY}")
 
 
