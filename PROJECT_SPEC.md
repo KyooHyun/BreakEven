@@ -129,9 +129,10 @@ g*가 비현실적으로 나오는 세그먼트에 대해서는 **할인이 답�
 outputs/
   tables/
     segment_profile.csv        # 세그먼트별 프로파일
-    bep_heatmap.csv            # 세그먼트 × 업종 필요 증분 이용률
+    bep_heatmap.csv            # 세그먼트 × 업종 필요 증분 이용률 (+ 탄력성 반영 성립 여부)
     product_proposals.csv      # 카드 상품 3안
-    sensitivity.csv            # 민감도 분석 결과
+    structural_alternatives.csv # 이연적립·연회비 선회수 구조 실험 (H8)
+    sensitivity.csv            # 민감도 분석 결과 (수수료율/유입상권/k/탄력성/실제상품 대조)
   figures/
     consumption_rhythm.png     # 시간대·요일 소비 곡선
     segment_radar.png          # 세그먼트별 업종 비중
