@@ -1,7 +1,7 @@
 # 입력: outputs/tables/segment_industry_amt.csv, outputs/tables/segment_profile.csv,
 #       config/assumptions.yaml
 # 출력: outputs/tables/bep_heatmap.csv, outputs/tables/product_proposals.csv,
-#       outputs/figures/bep_curve.png
+#       outputs/tables/structural_alternatives.csv, outputs/figures/bep_curve.png
 # 목적: 세그먼트 × 업종 조합별로 손익분기 필요 증분 이용률 g*를 역산하고
 #       (PROJECT_SPEC.md 2절 핵심 수식), g_star_threshold(config, 사용자 확정 0.50) 이하
 #       성립 구간에서 카드 상품 3안 초안을 만든다.
@@ -9,6 +9,15 @@
 #   g* = r / (f - r)   (f > r 일 때만 유효. f <= r이면 할인 자체가 성립 불가.)
 #   f는 업종별 가정치(config/assumptions.yaml merchant_fee_rate) — 매출구간별 공시를
 #   업종에 매핑한 것이라 프로젝트에서 가장 근거가 약한 가정. L4 민감도 분석 최우선 대상.
+#
+# g*는 f·r에만 의존하고 세그먼트 변수가 없다(H6, docs/hypothesis-log.md) — "성립 구간"이
+# threshold 기준으로는 세그먼트 무관하게 동일하게 나온다는 구조적 한계가 있다. 이를
+# 보완하기 위해 두 가지를 추가한다(H7·H8, docs/hypothesis-log.md):
+#   1. 세그먼트별 혜택 반응 탄력성 가정(segment_response_elasticity)으로 "이 세그먼트가
+#      실제로 달성 가능한 증분 이용률"을 별도 추정해 threshold 기준 성립 여부와 대조.
+#   2. 즉시할인 구조를 이연적립(breakage)·연회비 선회수(annual fee)로 바꿨을 때 g*가
+#      얼마나 내려오는지 계산 — 즉시할인으로는 불가능했던 2위 지출 업종(음식)에 적용.
+# 두 가정 모두 근거가 얇은 판단치이며(config/assumptions.yaml 주석 참고) L4 민감도 대상.
 #
 # product_proposals.csv는 실측 g*/현재 지출 비중을 근거로 한 AI 초안이다. 특히 "전략설명"·
 # "리스크"는 데이터가 아니라 해석이므로 사람이 검토·수정할 것 (CLAUDE.md 규칙 2, 4).
@@ -28,7 +37,12 @@ SEGMENT_PROFILE_PATH = Path("outputs/tables/segment_profile.csv")
 CONFIG_PATH = Path("config/assumptions.yaml")
 OUT_HEATMAP = Path("outputs/tables/bep_heatmap.csv")
 OUT_PROPOSALS = Path("outputs/tables/product_proposals.csv")
+OUT_STRUCTURAL = Path("outputs/tables/structural_alternatives.csv")
 OUT_FIGURE = Path("outputs/figures/bep_curve.png")
+
+# 구조 실험 대상 업종 — cluster1·cluster2 모두 2위 지출 업종(음식)이 즉시할인으로는
+# 성립 불가(H6)했으므로, 이연적립·연회비 선회수 구조를 이 업종에 적용해본다.
+STRUCTURAL_TARGET_INDUSTRY = "음식"
 
 # dataviz 스킬 palette.md 기준 categorical 슬롯 1~5 — g*는 f에만 의존하므로 업종을
 # f(수수료율) 기준으로 묶어 최대 5개 곡선으로 표현(9개 업종이 5개 구간으로 수렴)
@@ -67,6 +81,44 @@ def g_star(f: float, r: float) -> float:
     return r / (f - r)
 
 
+def expected_g(r: float, r_min: float, elasticity_coef: float) -> float:
+    """세그먼트별 혜택 반응 탄력성 가정 하 '실제 달성 가능한' 증분 이용률.
+    (config/assumptions.yaml segment_response_elasticity — 근거 얇은 판단치, 선형 가정)"""
+    return elasticity_coef * (r / r_min)
+
+
+def g_star_deferred(f: float, r: float, breakage_rate: float) -> float:
+    """이연적립 구조. 소멸률만큼 실효 혜택률이 낮아져 카드사 실효 비용이 줄어든다."""
+    effective_r = r * (1 - breakage_rate)
+    return g_star(f, effective_r)
+
+
+def required_breakage_rate(f: float, r: float, threshold: float) -> float:
+    """g*_deferred가 threshold와 같아지려면 필요한 소멸률. r 자체가 이미 threshold를
+    만족하면 0. f<=r이면(할인 자체가 불가한 업종) 소멸률로는 구제 불가 -> inf."""
+    if f <= r:
+        return np.inf
+    effective_r_required = threshold * f / (1 + threshold)
+    if effective_r_required >= r:
+        return 0.0
+    return 1 - effective_r_required / r
+
+
+def required_annual_fee_share(f: float, r: float, a_monthly: float, threshold: float, annual_fee_pool_monthly: float) -> float:
+    """연회비 수입 중 이 업종 혜택 보전에 배정해야 하는 비율. g*_base가 이미
+    threshold 이하면 0. f<=r이면(할인 자체가 불가) 연회비로는 구제 불가 -> inf.
+    필요 배정액이 전체 연회비 풀을 넘으면(=100% 배정해도 부족) 그 비율(>1)을 그대로 반환."""
+    if f <= r:
+        return np.inf
+    g_base = g_star(f, r)
+    if g_base <= threshold:
+        return 0.0
+    required_af_monthly = (g_base - threshold) * a_monthly * (f - r)
+    if annual_fee_pool_monthly <= 0:
+        return np.inf
+    return required_af_monthly / annual_fee_pool_monthly
+
+
 def load_config() -> dict:
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -86,6 +138,7 @@ def main() -> None:
     seg_industry = pd.read_csv(SEGMENT_INDUSTRY_PATH)
     sweep = cfg["benefit_rate_sweep"]
     r_values = np.round(np.arange(sweep["min"], sweep["max"] + sweep["step"], sweep["step"]), 4)
+    elasticity_cfg = cfg["segment_response_elasticity"]
 
     rows = []
     for _, row in seg_industry.iterrows():
@@ -93,11 +146,14 @@ def main() -> None:
         f = fee_rates.get(industry)
         if f is None:
             continue
+        seg = row["segment"]
+        elasticity_coef = elasticity_cfg.get(seg)
         for r in r_values:
             g = g_star(f, r)
+            g_expected = expected_g(r, sweep["min"], elasticity_coef) if elasticity_coef is not None else None
             rows.append(
                 {
-                    "세그먼트": row["segment"],
+                    "세그먼트": seg,
                     "업종": industry,
                     "f(수수료율)": f,
                     "r(혜택률)": r,
@@ -105,6 +161,9 @@ def main() -> None:
                     "현재월매출액": round(row["월추정매출액"]),
                     "필요증분매출액": round(row["월추정매출액"] * g) if np.isfinite(g) else None,
                     "월혜택지급액(현재기준)": round(row["월추정매출액"] * r),
+                    "threshold기준_성립": bool(np.isfinite(g) and g <= cfg["g_star_threshold"]),
+                    "세그먼트예상반응g(탄력성가정)": g_expected,
+                    "탄력성기준_성립": bool(g_expected is not None and np.isfinite(g) and g_expected >= g),
                 }
             )
 
@@ -112,6 +171,13 @@ def main() -> None:
     OUT_HEATMAP.parent.mkdir(parents=True, exist_ok=True)
     heatmap.to_csv(OUT_HEATMAP, index=False, encoding="utf-8-sig")
     print(f"[완료] {OUT_HEATMAP} ({len(heatmap):,} rows)")
+
+    both = heatmap[heatmap["threshold기준_성립"] & heatmap["탄력성기준_성립"]]
+    threshold_only = heatmap[heatmap["threshold기준_성립"] & ~heatmap["탄력성기준_성립"]]
+    print(
+        f"\n=== threshold 기준 vs 탄력성 기준 성립 판정 비교 (세그먼트×업종×r 조합 전체 {len(heatmap):,}건 중) ===\n"
+        f"두 기준 모두 성립: {len(both):,}건 / threshold만 성립(탄력성 기준으로는 달성 어려움): {len(threshold_only):,}건"
+    )
 
     print("\n=== r=0.5%, r=1.0% 스냅샷 (세그먼트×업종별 g*) ===")
     for r_snap in [0.005, 0.010]:
@@ -121,6 +187,7 @@ def main() -> None:
         print(pivot.round(2).to_string())
 
     build_proposals(heatmap, cfg["g_star_threshold"])
+    build_structural_alternatives(seg_industry, cfg)
     plot_bep_curve(fee_rates, cfg["g_star_threshold"], sweep)
 
 
@@ -206,6 +273,70 @@ def build_proposals(heatmap: pd.DataFrame, threshold: float) -> None:
     proposals.to_csv(OUT_PROPOSALS, index=False, encoding="utf-8-sig")
     print(f"\n[완료] {OUT_PROPOSALS}")
     print(proposals.to_string(index=False))
+
+
+def build_structural_alternatives(seg_industry: pd.DataFrame, cfg: dict) -> None:
+    """즉시할인으로는 성립 불가한 2위 지출 업종(음식)에 이연적립(cluster1)·연회비
+    선회수(cluster2) 구조를 적용했을 때 g*가 얼마나 내려오는지 계산한다 (H8).
+    r은 즉시할인 상품안과 동일하게 benefit_rate_sweep 최솟값(0.3%)을 기준으로 잡는다."""
+    threshold = cfg["g_star_threshold"]
+    r = cfg["benefit_rate_sweep"]["min"]
+    breakage = cfg["deferred_reward_breakage_rate"]
+    annual_fee_monthly = cfg["annual_fee_krw"] / 12
+    avg_tx_per_card = cfg["avg_monthly_transactions_per_card"]
+    f = cfg["merchant_fee_rate"][STRUCTURAL_TARGET_INDUSTRY]
+
+    seg_totals = seg_industry.groupby("segment")["월추정이용건수"].sum()
+
+    target_rows = seg_industry[seg_industry["card_tpbuz_nm_1"] == STRUCTURAL_TARGET_INDUSTRY].set_index("segment")
+
+    rows = []
+    for seg, structure in [("cluster1", "이연적립"), ("cluster2", "연회비선회수")]:
+        a_monthly = target_rows.loc[seg, "월추정매출액"]
+        g_base = g_star(f, r)
+
+        n_cards = seg_totals.loc[seg] / avg_tx_per_card
+        annual_fee_pool_monthly = annual_fee_monthly * n_cards
+
+        row = {
+            "세그먼트": seg,
+            "적용업종": STRUCTURAL_TARGET_INDUSTRY,
+            "f(수수료율)": f,
+            "r(혜택률)": r,
+            "즉시할인_g*": g_base,
+            "즉시할인_threshold이하": bool(np.isfinite(g_base) and g_base <= threshold),
+            "구조": structure,
+        }
+        if structure == "이연적립":
+            g_deferred = g_star_deferred(f, r, breakage)
+            b_required = required_breakage_rate(f, r, threshold)
+            row.update(
+                {
+                    "가정_소멸률": breakage,
+                    "적용후_g*": g_deferred,
+                    "적용후_threshold이하": bool(np.isfinite(g_deferred) and g_deferred <= threshold),
+                    "threshold충족_필요소멸률": b_required,
+                    "가정치로_충분한가": bool(breakage >= b_required),
+                }
+            )
+        else:
+            n_cards_round = round(n_cards)
+            share_required = required_annual_fee_share(f, r, a_monthly, threshold, annual_fee_pool_monthly)
+            row.update(
+                {
+                    "추정_세그먼트카드수": n_cards_round,
+                    "연회비수입_월(전체풀)": round(annual_fee_pool_monthly),
+                    "threshold충족_필요배정비율": share_required,
+                    "가정치로_충분한가": bool(0 <= share_required <= 1),
+                }
+            )
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    OUT_STRUCTURAL.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(OUT_STRUCTURAL, index=False, encoding="utf-8-sig")
+    print(f"\n[완료] {OUT_STRUCTURAL}")
+    print(result.to_string(index=False))
 
 
 if __name__ == "__main__":
