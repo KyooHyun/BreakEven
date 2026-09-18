@@ -133,10 +133,19 @@ outputs/
     product_proposals.csv      # 카드 상품 3안
     structural_alternatives.csv # 이연적립·연회비 선회수 구조 실험 (H8)
     sensitivity.csv            # 민감도 분석 결과 (수수료율/유입상권/k/탄력성/실제상품 대조)
+    # L5 확장 — 우리카드 이원 결제망 (src/08_woori_dual_network.py, H19~H21)
+    woori_c_implied.csv        # 대행수수료율 c 역산과 각 c가 함축하는 연간 결제액
+    woori_feff_gstar.csv       # 업종 x c x a x r -> 실효 수수료율 f_eff와 g*
+    woori_alpha_frontier.csv   # 성립에 필요한 독자망 전환율 a* (핵심 산출물)
+    woori_segment_impact.csv   # 세그먼트별 대행수수료 잠식률·유출액
+    woori_industry_priority.csv # 어느 업종부터 독자망으로 전환할 것인가 (금액축 x 판정축)
+    woori_leak_rank_robustness.csv # 세그먼트 잠식률 순위의 견고성 (c 격자 x 업종매핑)
+    woori_threshold_sweep.csv  # threshold 45~60% 스윕 (판정 뒤집힘이 유지되는 구간)
   figures/
     consumption_rhythm.png     # 시간대·요일 소비 곡선
     segment_radar.png          # 세그먼트별 업종 비중
     bep_curve.png              # 혜택률 대비 필요 증분 이용률 곡선
+    woori_alpha_frontier.png   # 독자망 전환율 대비 필요 증분 이용률 곡선
 
 docs/
   hypothesis-log.md            # 가설 → 검증 → 결과(특히 깨진 가설)

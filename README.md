@@ -113,6 +113,8 @@ peak_day) 상품 노출 시점으로 반영했다.
    가설과 결과가 어긋난 경위는 "주요 발견 요약" 참조)
 3. L3 수익성 역산 — 세그먼트 × 업종별 g*(필요 증분 이용률) 히트맵, 카드 상품 3안
 4. L4 민감도 분석 — 가정치를 흔들었을 때 결론이 유지되는 범위
+5. L5 모델 확장 — 실제 시장 상품(원더카드 2.0·하나카드 19149) 투입, 그리고 손익식의 f를
+   이원 결제망(독자망 / BC 대행망)으로 분리해 결제망이 혜택 여력을 얼마나 바꾸는지 계산
 
 ## 주요 발견 요약 (근거 기반, 해석은 아래 "결론"에서)
 
@@ -198,6 +200,38 @@ peak_day) 상품 노출 시점으로 반영했다.
   좁았다(H18).
   (근거: outputs/tables/hana19149_*.csv, src/07_product_hanacard.py,
   docs/hypothesis-log.md H15~H18)
+- **손익식에 항이 하나 빠져 있었다 — 결제망**: 기존 모델의 f는 명목 가맹점 수수료율이었다.
+  그런데 우리카드처럼 독자결제망과 BC 대행망을 함께 쓰는 카드사는 결제가 어느 망을 타느냐에
+  따라 대행 수수료가 붙고 안 붙는데, 내 식에는 그 항이 아예 없었다. 넣고 보니
+  (`f_eff = f − (1−a)·c`, a=독자망 결제 비중, c=대행 수수료율) **기존 계산 전체가 대행
+  수수료 0, 즉 독자망 전환이 이미 끝난 상태를 가정하고 있었다.** (새 항을 넣은 모듈이 기존
+  결과를 깨지 않았다는 확인: a=100%에서 g*가 기존 값과 일치한다. 식에서 자명한 퇴화
+  케이스이므로 회귀 테스트로만 읽는다.)
+  이 결과는 두 층으로 되어 있고, 층마다 기대는 가정이 다르다.
+  **(1) 잠식의 크기** — 실측 대리값 a=37.8%에서 **명목 f의 13.2~14.8%가 깎인다.** 이 층은
+  threshold와 무관하게 성립하고 c 추정치에만 걸린다.
+  **(2) 판정의 뒤집힘** — 그 크기가 판정을 바꿀 만한 수준이어서, threshold를 50%로 둔
+  기준에서 의료/건강이 42.9%→51.8%로 넘어간다. 여기서 50%는 데이터가 준 선이 아니라
+  사람이 정한 판단치이므로(config/assumptions.yaml 주석), 45~60%로 흔들어봤다 —
+  **뒤집힘은 threshold 42.9~51.8% 구간에서만 나타난다**(구간의 양 끝이 정확히 항을 넣기
+  전후의 g*값이므로 구조상 당연하고, 정보는 그 구간의 폭과 위치다). 즉 현재 threshold
+  50%는 뒤집힘이 사라지는 경계에서 **1.8%p 아래**에 있다. threshold를 52%로만 올려도
+  뒤집히는 업종은 0개가 된다. **(2)는 threshold 선택에 민감하므로 (1)과 분리해서 읽어야
+  한다.**
+  **혜택률 0.3%가 음식 업종에서 이론상 가능해지려면 독자망 전환율이 48.5%여야 하는데
+  현재 37.8%로 10.7%p 모자란다.** 다만 같은 계산이 반대편 결과도 낸다 — 음식이
+  threshold(g*≤50%)를 충족하려면 **전환율을 100%까지 올려도 성립하지 않는다.** 독자망은
+  음식 혜택을 가능하게 만드는 수단이 아니라는 뜻이다. 전환으로 판정이 실제로 뒤집히는
+  업종은 의료/건강·학문교육(10.7%p 추가 전환이면 충족)이고, 새어나가는 금액이 가장 큰
+  업종(소매/유통 월 29.9억원, 경기도 데이터 구성 대입 기준)은 이미 성립해 전환해도 판정이
+  바뀌지 않는다 — **비용 절감액이 큰 업종과 혜택 설계가 풀리는 업종이 일치하지 않는다.**
+  이 결과는 c(비공개, 상하한을 특정할 수 없는 추정치)에 매우 민감하다: c=0.15%면 음식은
+  현재 전환율로 이미 성립이고 c=0.25%면 60%가 필요하다 — c를 좁히는 것이 후속 최우선
+  과제다(docs/limitations.md 8번).
+  (근거: outputs/tables/woori_alpha_frontier.csv, outputs/tables/woori_industry_priority.csv,
+  outputs/tables/woori_segment_impact.csv, outputs/tables/woori_leak_rank_robustness.csv,
+  outputs/tables/woori_threshold_sweep.csv, src/08_woori_dual_network.py,
+  docs/hypothesis-log.md H19·H20·H21, docs/limitations.md 0번·8번)
 
 ## 카드 상품 3안 (초안 — 검토 필요)
 
@@ -234,9 +268,13 @@ src/04_economics.py)
 
 ![세그먼트별 업종 비중](outputs/figures/segment_radar.png)
 ![혜택률 대비 필요 증분 이용률](outputs/figures/bep_curve.png)
+![독자망 전환율 대비 필요 증분 이용률](outputs/figures/woori_alpha_frontier.png)
 
-(근거: outputs/figures/, src/03_segment.py, src/04_economics.py.
-시간대·요일 소비 곡선은 outputs/figures/consumption_rhythm.png 참조.)
+(근거: outputs/figures/, src/03_segment.py, src/04_economics.py,
+src/08_woori_dual_network.py.
+시간대·요일 소비 곡선은 outputs/figures/consumption_rhythm.png 참조.
+세 번째 그림의 세로선은 실측 대리값(독자카드 매출 비중 2026 1Q 37.8%)이며, 음영은
+1년 전(16.2%)부터의 이동 구간이다 — 대리 지표인 이유는 docs/limitations.md 8번 참조.)
 
 ## 결론
 
@@ -330,8 +368,20 @@ python src/02_clean.py
 python src/03_segment.py
 python src/04_economics.py
 python src/05_report.py
+python src/06_product_wondercard.py
+python src/07_product_hanacard.py
+python src/08_woori_dual_network.py
 ```
 
 원본 데이터는 저장소에 포함되지 않는다. `data/raw/`에 아래를 받아 배치할 것:
 - 공공데이터포털 — 경기도 카드 소비 데이터 (+ 경기도 민간데이터 규격서)
 - 여신금융협회 가맹점 수수료율 공시
+
+`src/06_product_wondercard.py`가 쓰는 `data/reference/wondercard2_benefits.csv`
+(하나카드 원더카드 2.0 혜택표를 직접 전사한 것 — 영역→업종 매핑 열은 사용자 가정치)는
+저장소에 포함돼 있어 별도 다운로드가 필요 없다.
+
+`src/08_woori_dual_network.py`는 별도 데이터 파일 없이 `config/assumptions.yaml`의
+`woori_dual_network` 블록만 읽는다. 그 블록의 외부 수치(독자카드 매출 비중, 프로세싱
+수수료 규모, 개인 신용판매 이용실적)는 전부 출처 URL과 확인일이 함께 적혀 있고,
+공개되지 않은 대행 수수료율 c는 역산·스윕으로만 다룬다(docs/limitations.md 8번).
