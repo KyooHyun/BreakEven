@@ -373,6 +373,15 @@ python src/07_product_hanacard.py
 python src/08_woori_dual_network.py
 ```
 
+스크립트는 진행 상황과 검증 결과를 한글로 출력하므로 **UTF-8 콘솔을 전제**한다.
+콘솔 인코딩이 UTF-8이 아닌 환경(예: Windows 기본 cp949)에서는 출력 도중
+`UnicodeEncodeError`가 나면서 중간에 멈춘다. 계산이 틀린 게 아니라 출력이 막히는
+것이므로, 아래처럼 인코딩을 지정해 실행하면 환경과 무관하게 동작한다.
+
+```
+PYTHONIOENCODING=utf-8 python src/08_woori_dual_network.py
+```
+
 원본 데이터는 저장소에 포함되지 않는다. `data/raw/`에 아래를 받아 배치할 것:
 - 공공데이터포털 — 경기도 카드 소비 데이터 (+ 경기도 민간데이터 규격서)
 - 여신금융협회 가맹점 수수료율 공시

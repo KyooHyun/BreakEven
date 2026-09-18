@@ -13,6 +13,8 @@
 #   5. 실제 판매 중인 카드 상품(대형마트 10% 할인, 월 한도 1.5만원, 웹 검색으로 확인)의
 #      명목 혜택률을 본 모델에 넣어 검증 (H10) — 실제 시장에 혜택 상품이 존재한다는
 #      사실 자체로 이 프로젝트의 비관적 결론이 흔들리는지 확인.
+#   6. 탄력성 기준 판정(H7·H9)도 업종->수수료구간 매핑 가정 위에 있는지 교차 확인
+#      (docs/limitations.md 0번 표의 미검증 칸을 채우기 위함)
 #   결론이 무너지는 조건은 숨기지 않고 그대로 기록한다.
 
 from pathlib import Path
@@ -33,6 +35,9 @@ FEE_TIERS = [0.0040, 0.0100, 0.0115, 0.0145, 0.0208]  # config/assumptions.yaml 
 EXCLUDED_AGES = {1, 11}
 REF_R = 0.003  # 최소 유의미 혜택률(0.3%) 기준으로 성립 여부 판정
 ELASTICITY_MULTIPLIERS = [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0]  # 현재 가정치 대비 배수
+# 6번 부분 매핑 시나리오 대상 — 1번에서 판정을 뒤집었던 영세구간(0.40%) 업종
+# (src/08_woori_dual_network.py LOW_FEE_INDUSTRIES와 동일)
+LOW_FEE_INDUSTRIES = ["음식", "생활서비스", "여가/오락"]
 
 # H10: 실제 시장 카드 상품 대비 검증. 웹 검색(2026-08-27)으로 확인한 실제 판매 상품 —
 # 롯데카드 LOCA CLASSIC: 전월실적 150만원 이상 시 대형마트 10% 할인, 월 한도 15,000원.
@@ -198,6 +203,86 @@ def elasticity_sensitivity(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     return sweep_df, required_df
 
 
+def elasticity_mapping_cross(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """6. 탄력성 기준 판정(H7·H9)도 업종->수수료구간 매핑 가정 위에 있는가.
+
+    docs/limitations.md 0번은 "서로 다른 결론들이 이 가정 하나에 공통으로 기대고 있다"를
+    표로 정리하는데, 탄력성 항목만 '구조적으로 같은 가정 위에 있으나 미검증'으로 비어
+    있었다. 비교 대상이 g*이고 g*는 f에서 나오므로 영향이 있는 건 분명하지만, 실제로
+    판정이 뒤집히는지는 계산해봐야 안다.
+
+    expected_g = coef * (r / r_min) 은 f와 무관하므로 매핑을 바꿔도 그대로다.
+    g*만 새 매핑으로 다시 계산해 (a) 성립 건수, (b) 세그먼트 1위 업종 필요 배수를 비교한다.
+    매핑 시나리오는 1번(fee_sensitivity)·08 계산5와 같은 규칙을 쓴다."""
+    heatmap = pd.read_csv(BEP_HEATMAP_PATH)
+    profile = pd.read_csv(SEGMENT_PROFILE_PATH).set_index("segment")
+    fee_rates = cfg["merchant_fee_rate"]
+    threshold = cfg["g_star_threshold"]
+    elasticity_cfg = cfg["segment_response_elasticity"]
+    r_min = cfg["benefit_rate_sweep"]["min"]
+
+    scenarios = {}
+    for label, shift in [("비관(한 단계 아래)", -1), ("기본(현재 가정)", 0), ("낙관(한 단계 위)", 1)]:
+        scenarios[label] = {
+            ind: FEE_TIERS[min(max(FEE_TIERS.index(f) + shift, 0), len(FEE_TIERS) - 1)]
+            for ind, f in fee_rates.items()
+        }
+    partial = dict(fee_rates)
+    for ind in LOW_FEE_INDUSTRIES:
+        partial[ind] = FEE_TIERS[min(FEE_TIERS.index(fee_rates[ind]) + 1, len(FEE_TIERS) - 1)]
+    scenarios["부분(저수수료 3개 업종만 한 단계 위)"] = partial
+
+    count_rows, required_rows = [], []
+    for label, mapping in scenarios.items():
+        h = heatmap.copy()
+        h["f_new"] = h["업종"].map(mapping)
+        h["g*_new"] = [g_star(f, r) for f, r in zip(h["f_new"], h["r(혜택률)"])]
+        finite = h[np.isfinite(h["g*_new"])]
+        elastic_ok = finite["세그먼트예상반응g(탄력성가정)"] >= finite["g*_new"]
+        threshold_ok = finite["g*_new"] <= threshold
+        count_rows.append(
+            {
+                "매핑시나리오": label,
+                "g*가 유한한 조합수": len(finite),
+                "threshold기준 성립": int(threshold_ok.sum()),
+                "탄력성기준 성립": int(elastic_ok.sum()),
+                "두 기준 모두 성립": int((elastic_ok & threshold_ok).sum()),
+            }
+        )
+        for seg in ["cluster0", "cluster1", "cluster2"]:
+            top_industry = profile.loc[seg, "주력업종_top3"].split(" / ")[0].split("(")[0]
+            row = h[
+                (h["세그먼트"] == seg) & (h["업종"] == top_industry) & np.isclose(h["r(혜택률)"], r_min)
+            ].iloc[0]
+            g_req = row["g*_new"]
+            coef = elasticity_cfg[seg]
+            required_rows.append(
+                {
+                    "매핑시나리오": label,
+                    "세그먼트": seg,
+                    "1위업종": top_industry,
+                    "f(시나리오)": row["f_new"],
+                    "g*(r=0.3%)": g_req,
+                    "가정_탄력성계수": coef,
+                    "필요배수(가정치대비)": g_req / coef if np.isfinite(g_req) else np.inf,
+                    "가정치_그대로_성립": bool(np.isfinite(g_req) and coef >= g_req),
+                }
+            )
+
+    count_df = pd.DataFrame(count_rows)
+    required_df = pd.DataFrame(required_rows)
+    print("\n=== 6a. 매핑을 흔들었을 때 탄력성 기준 성립 건수 ===")
+    print(count_df.to_string(index=False))
+    print("\n=== 6b. 매핑을 흔들었을 때 세그먼트 1위 업종의 필요 배수 (r=0.3%) ===")
+    print(required_df.round(4).to_string(index=False))
+    flips = required_df.groupby("세그먼트")["가정치_그대로_성립"].nunique()
+    print(
+        "\n매핑 시나리오에 따라 '가정치 그대로 성립' 판정이 갈리는 세그먼트: "
+        + (", ".join(flips[flips > 1].index) if (flips > 1).any() else "없음")
+    )
+    return count_df, required_df
+
+
 def real_product_check(cfg: dict) -> pd.DataFrame:
     """H10: 실제 판매 중인 카드 상품(대형마트 10% 할인, 월 한도 15,000원)의 명목
     혜택률을 그대로 넣으면 모델과 안 맞는다(r=10% >> f=1.15%) — 월 한도가 지출액에
@@ -250,6 +335,7 @@ def main() -> None:
     inflow_df = inflow_sensitivity()
     k_df = k_sensitivity(cfg)
     elasticity_sweep_df, elasticity_required_df = elasticity_sensitivity(cfg)
+    elasticity_cross_count_df, elasticity_cross_required_df = elasticity_mapping_cross(cfg)
     real_product_df = real_product_check(cfg)
 
     OUT_SENSITIVITY.parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +352,10 @@ def main() -> None:
         elasticity_required_df.to_csv(f, index=False)
         f.write("\n## 5. 실제 카드 상품(대형마트 10% 할인) 대비 검증\n")
         real_product_df.to_csv(f, index=False)
+        f.write("\n## 6a. 매핑 x 탄력성 교차 — 성립 건수\n")
+        elasticity_cross_count_df.to_csv(f, index=False)
+        f.write("\n## 6b. 매핑 x 탄력성 교차 — 세그먼트 1위 업종 필요 배수\n")
+        elasticity_cross_required_df.to_csv(f, index=False)
     print(f"\n[완료] {OUT_SENSITIVITY}")
 
 
