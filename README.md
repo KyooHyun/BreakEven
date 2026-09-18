@@ -238,6 +238,12 @@ peak_day) 상품 노출 시점으로 반영했다.
 세그먼트별 g* 히트맵에서 손익분기가 성립하는 업종·혜택률만 골라 구성했다. 혜택 업종은
 "그 세그먼트의 상위 지출 업종 중 threshold(g*≤50%)를 통과한 것"만 남긴 결과이고,
 아래 "설계 근거" 열은 그 선별 과정에서 나온 수치를 그대로 옮긴 것이다.
+
+`product_proposals.csv`의 `전략설명(AI초안, 검토필요)`·`리스크(AI초안, 검토필요)` 열은
+`src/04_economics.py`가 뱉는 **스크립트 원본 출력**이고, 위 표는 그 열을 계산 근거로
+다시 쓴 **검토본**이다. 컬럼명을 고치지 않고 그대로 둔 이유는 원본과 검토본의 구분을
+남겨두기 위해서다 — 컬럼명을 바꾸면 04를 다시 돌렸을 때 나오는 새 출력도 검토본처럼
+보인다.
 (근거: outputs/tables/product_proposals.csv, outputs/tables/bep_heatmap.csv,
 outputs/tables/segment_industry_amt.csv, src/04_economics.py)
 
